@@ -36,6 +36,8 @@ struct TestMembarPass
 
 namespace mlir {
 namespace test {
-void registerTestMembarPass() { PassRegistration<TestMembarPass>(); }
+void registerTestMembarPass() { 
+  // PassRegistration<TestMembarPass>(); 
+}
 } // namespace test
 } // namespace mlir
