@@ -143,7 +143,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
     di = runtime.driver.active.get_device_interface()
 
     fn()
-    # di.synchronize()
+    di.synchronize()
 
     cache = runtime.driver.active.get_empty_cache_for_benchmark()
 
@@ -155,7 +155,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
         runtime.driver.active.clear_cache(cache)
         fn()
     end_event.record()
-    # di.synchronize()
+    di.synchronize()
     estimate_ms = start_event.elapsed_time(end_event) / 5
 
     # compute number of warmup and repeat
@@ -181,7 +181,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
         fn()
         end_event[i].record()
     # Record clocks
-    # di.synchronize()
+    di.synchronize()
     times = [s.elapsed_time(e) for s, e in zip(start_event, end_event)]
     return _summarize_statistics(times, quantiles, return_mode)
 
