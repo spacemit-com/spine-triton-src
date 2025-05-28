@@ -122,6 +122,9 @@ tt.func @gather_op() {
 
 // -----
 
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 32, transposed = false, elementBitWidth = 8}>
+#bar_layout = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0], CTAsPerCGA = [1], CTASplitNum = [1], CTAOrder = [0]}>
+
 // CHECK: [[SLICE_PARENT:#.*]] = #ttg.blocked<{sizePerThread = [1, 4], threadsPerWarp = [32, 1], warpsPerCTA = [1, 2], order = [1, 0]}>
 
 // CHECK: @gather4_layout
@@ -155,22 +158,13 @@ tt.func @ub_poison() {
 
 // -----
 
-#blocked2 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [2], order = [0]}>
-
-module attributes {"ttg.num-warps" = 4 : i32} {
-
-// CHECK-LABEL: @partition_axis_info
-tt.func @partition_axis_info(%arg0: !tt.ptr<i32>, %arg1: !tt.ptr<i32>) {
-  ttg.warp_specialize(%arg0)
-  default {
-    ttg.warp_yield
-  }
-  partition0(%arg2: !tt.ptr<i32>) num_warps(2) {
-    %splatted = tt.splat %arg2 : !tt.ptr<i32> -> tensor<256x!tt.ptr<i32>, #blocked2>
-    %input = tt.load %splatted : tensor<256x!tt.ptr<i32>, #blocked2>
-    ttg.warp_return
-  } : (!tt.ptr<i32>) -> ()
+// CHECK-LABEL: @cf_br
+tt.func @cf_br(%ptr: !tt.ptr<i32>) {
+  %cst = arith.constant dense<1> : tensor<128xi32>
+  // cf.br ^bb1(%{{.+}} : tensor<128xi32, #{{.+}}>)
+  cf.br ^bb1(%cst : tensor<128xi32>)
+^bb1(%arg0: tensor<128xi32>):
+  %ptrs = tt.splat %ptr : !tt.ptr<i32> -> tensor<128x!tt.ptr<i32>>
+  tt.store %ptrs, %arg0 : tensor<128x!tt.ptr<i32>>
   tt.return
-}
-
 }

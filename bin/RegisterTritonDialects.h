@@ -39,7 +39,7 @@ namespace test {
 
 inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::registerAllPasses();
-  mlir::registerTritonPasses();
+  mlir::triton::registerTritonPasses();
   mlir::triton::gpu::registerTritonGPUPasses();
   // mlir::registerTritonNvidiaGPUPasses();
   // mlir::test::registerTestAliasPass();
@@ -81,10 +81,10 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
       mlir::triton::gpu::TritonGPUDialect, mlir::math::MathDialect,
       mlir::arith::ArithDialect, mlir::scf::SCFDialect, mlir::gpu::GPUDialect,
       mlir::LLVM::LLVMDialect, mlir::NVVM::NVVMDialect
-      // mlir::triton::nvgpu::NVGPUDialect, 
+      // mlir::triton::nvgpu::NVGPUDialect,
       // mlir::triton::nvws::NVWSDialect,
       // mlir::triton::amdgpu::TritonAMDGPUDialect,
-      // mlir::triton::proton::ProtonDialect, 
+      // mlir::triton::proton::ProtonDialect,
       // mlir::ROCDL::ROCDLDialect
       >();
 }

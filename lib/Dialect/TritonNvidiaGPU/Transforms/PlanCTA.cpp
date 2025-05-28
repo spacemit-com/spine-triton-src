@@ -24,18 +24,23 @@
 #include <queue>
 
 #include "mlir/Support/LLVM.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/Passes.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/ErrorHandling.h"
 
-#define GEN_PASS_CLASSES
+namespace ttg = mlir::triton::gpu;
+
+namespace mlir {
+namespace triton {
+namespace nvidia_gpu {
+
+#define GEN_PASS_DEF_TRITONGPUPLANCTAPASS
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/Passes.h.inc"
 
 namespace {
-
-using namespace mlir;
-namespace ttg = ::mlir::triton::gpu;
-namespace ttng = ::mlir::triton::nvidia_gpu;
 
 // TODO: use ConvertLayoutOp
 using CastOp = ::mlir::UnrealizedConversionCastOp;
@@ -80,7 +85,7 @@ replaceCTALayout(ttg::DistributedEncodingTrait layout,
 
 class CTAPlanner {
 public:
-  CTAPlanner(ttng::ClusterInfo *clusterInfo_);
+  CTAPlanner(ClusterInfo *clusterInfo_);
   ~CTAPlanner();
 
   void run(triton::FuncOp &funcOp);
@@ -151,18 +156,18 @@ private:
   // Otherwise, a self-managed ClusterInfo will be created and the ownInfo will
   // be set to true.
   bool ownInfo;
-  ttng::ClusterInfo *clusterInfo;
+  ClusterInfo *clusterInfo;
   bool tiled;
   unsigned step;
   unsigned stepUnchanged;
   std::queue<CastOp> queue;
 };
 
-CTAPlanner::CTAPlanner(ttng::ClusterInfo *clusterInfo_)
+CTAPlanner::CTAPlanner(ClusterInfo *clusterInfo_)
     : ownInfo(false), clusterInfo(clusterInfo_), tiled(false), step(0),
       stepUnchanged(0) {
   if (clusterInfo == nullptr) {
-    clusterInfo = new ttng::ClusterInfo();
+    clusterInfo = new ClusterInfo();
     ownInfo = true;
   }
 }
@@ -231,7 +236,6 @@ bool CTAPlanner::isForward(CastOp cast) const {
 void CTAPlanner::setTiling(llvm::ArrayRef<unsigned> CTAsPerCGA) {
   assert(!tiled && "CTA tiling is already determinted");
   assert(clusterInfo && "ClusterInfo pointer is null");
-  assert(CTAsPerCGA.size() <= 3 && "setTiling not implemented");
   tiled = true;
   unsigned numCTAs = 1;
   for (unsigned cta : CTAsPerCGA)
@@ -249,6 +253,9 @@ void CTAPlanner::setTiling(llvm::ArrayRef<unsigned> CTAsPerCGA) {
     clusterInfo->clusterDimY = CTAsPerCGA[1];
   if (CTAsPerCGA.size() > 2)
     clusterInfo->clusterDimZ = CTAsPerCGA[2];
+  for (auto i = 3; i < CTAsPerCGA.size(); ++i)
+    if (CTAsPerCGA[i] != 1)
+      llvm::report_fatal_error("tiling > 3 dims is not implemented");
 }
 
 bool CTAPlanner::processDot(triton::FuncOp &funcOp) {
@@ -387,8 +394,8 @@ void CTAPlanner::processStoreLikeOps(triton::FuncOp &funcOp) {
 
   llvm::SmallVector<Operation *> stores;
   funcOp.walk([&](Operation *op) {
-    if (llvm::isa<triton::StoreOp, triton::AtomicRMWOp, triton::AtomicCASOp>(
-            op))
+    if (llvm::isa<triton::StoreOp, triton::AtomicRMWOp, triton::AtomicCASOp,
+                  triton::DescriptorStoreLikeOpInterface>(op))
       stores.push_back(op);
   });
   assert(stores.size() > 0 && "Cannot find store-like ops");
@@ -396,8 +403,13 @@ void CTAPlanner::processStoreLikeOps(triton::FuncOp &funcOp) {
 
   ttg::CTALayoutAttr CTALayout;
   for (Operation *store : stores) {
-    if (auto tensorTy =
-            dyn_cast<RankedTensorType>(store->getOperand(0).getType())) {
+    auto val = [store]() -> Value {
+      if (auto descStore =
+              dyn_cast<triton::DescriptorStoreLikeOpInterface>(store))
+        return descStore.getSrc();
+      return store->getOperand(0);
+    }();
+    if (auto tensorTy = dyn_cast<RankedTensorType>(val.getType())) {
       if (!tiled) {
         // Use CTA tiling of the first store-like op as global CTA tiling
         CTALayout = ttg::getCTALayout(tensorTy.getEncoding());
@@ -607,7 +619,9 @@ void CTAPlanner::eliminateAdjacentCasts(CastOp cast0, CastOp cast1) {
 
 bool CTAPlanner::isLoadStoreOp(Operation *op) const {
   return llvm::isa<triton::LoadOp, triton::StoreOp, triton::AtomicRMWOp,
-                   triton::AtomicCASOp>(op);
+                   triton::AtomicCASOp, triton::DescriptorLoadOp,
+                   triton::DescriptorStoreLikeOpInterface,
+                   triton::DescriptorGatherOp>(op);
 }
 
 bool CTAPlanner::processLoadStore(Operation *op, Attribute layout) {
@@ -638,7 +652,11 @@ bool CTAPlanner::processLoadStore(Operation *op, Attribute layout) {
     auto type = op->getOperand(i).getType();
     if (auto ptrTy = dyn_cast<triton::PointerType>(type))
       type = ptrTy.getPointeeType();
-    auto tensorTy = cast<RankedTensorType>(type);
+    auto tensorTy = dyn_cast<RankedTensorType>(type);
+    if (!tensorTy) {
+      newOperandLayouts.push_back(Attribute());
+      continue;
+    }
     auto oldLayout =
         cast<ttg::DistributedEncodingTrait>(tensorTy.getEncoding());
     auto newLayout =
@@ -1021,10 +1039,11 @@ bool CTAPlanner::processMultiUsersForward(Value castResult, CastOp cast) {
   return true;
 }
 
-struct PlanCTAPass : public TritonGPUPlanCTAPassBase<PlanCTAPass> {
-  PlanCTAPass(ttng::ClusterInfo *clusterInfo_ = nullptr)
-      : clusterInfo(clusterInfo_) {}
+} // anonymous namespace
 
+struct PlanCTAPass : public impl::TritonGPUPlanCTAPassBase<PlanCTAPass> {
+  PlanCTAPass(ClusterInfo *clusterInfo_ = nullptr)
+      : clusterInfo(clusterInfo_) {}
   void runOnOperation() override {
     ModuleOp mod = getOperation();
 
@@ -1046,15 +1065,17 @@ struct PlanCTAPass : public TritonGPUPlanCTAPassBase<PlanCTAPass> {
     });
   }
 
-  ttng::ClusterInfo *clusterInfo;
+  ClusterInfo *clusterInfo;
 };
 
-} // namespace
-
 std::unique_ptr<Pass>
-mlir::createTritonNvidiaGPUPlanCTAPass(ttng::ClusterInfo *clusterInfo) {
+createTritonNvidiaGPUPlanCTAPass(ClusterInfo *clusterInfo) {
   return std::make_unique<PlanCTAPass>(clusterInfo);
 }
+
+} // namespace nvidia_gpu
+} // namespace triton
+} // namespace mlir
 
 /* TODO
  * - Use ConvertLayoutOp instead of UnrealizedConversionCastOp.
