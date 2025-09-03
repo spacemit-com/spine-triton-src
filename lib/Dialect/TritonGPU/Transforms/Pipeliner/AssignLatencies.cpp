@@ -106,34 +106,10 @@ private:
     return !incompatible;
   }
 
-  bool isSmallLoad(tt::LoadOp loadOp,
-                   tt::ModuleAxisInfoAnalysis &axisInfoAnalysis) {
-    assert(!isLoadFromTensorPtr(loadOp) &&
-           "Block ptr should have been lowered before this pass.");
-    auto ptr = loadOp.getPtr();
-    unsigned vec = axisInfoAnalysis.getContiguity(ptr);
-    if (auto mask = loadOp.getMask())
-      vec = std::min<unsigned>(vec, axisInfoAnalysis.getMaskAlignment(mask));
-
-    auto tensorTy = dyn_cast<RankedTensorType>(ptr.getType());
-    if (!tensorTy)
-      return true;
-    auto ty = cast<tt::PointerType>(tensorTy.getElementType()).getPointeeType();
-    unsigned width = vec * ty.getIntOrFloatBitWidth();
-
-    // We do not pipeline all loads for the following reasons:
-    // 1. On nvidia GPUs, cp.async's cp-size can only be 4, 8, or 16.
-    // 2. It's likely that pipling small loads won't offer much performance
-    //    improvement and may even hurt performance by increasing register
-    //    pressure.
-    LDBG("Load " << *loadOp << " has width " << width);
-    return width < 32;
-  }
-
   bool isPipeliningBeneficial(Operation *op, Operation *finalUser,
                               tt::ModuleAxisInfoAnalysis &axisInfoAnalysis) {
     if (auto loadOp = dyn_cast<tt::LoadOp>(op)) {
-      if (isSmallLoad(loadOp, axisInfoAnalysis)) {
+      if (!canBeConvertedToAsyncLoad(loadOp, axisInfoAnalysis)) {
         LDBG("Load " << *loadOp << " is too small for pipelining");
         return false;
       }
@@ -275,10 +251,10 @@ public:
         // place the wait right before the loads.
 
         if (hasSyncDots(forOp)) {
-          // Skip pipelining MMA in the loops where sync dots are used. This is
-          // dirty heuristic for performance drops in kernels where we would
-          // rather want to have last iteration peeled instead of having a full
-          // iteration of masked operations only to execute single wait.
+          // Skip pipelining MMA in the loops where sync dots are used. This
+          // is a dirty heuristic for performance drops in kernels where we
+          // would rather want to have last iteration peeled instead of having a
+          // full iteration of masked operations only to execute single wait.
           continue;
         }
         auto pipeHelper = ttng::MMAv5PipelineableOperandsHelper(

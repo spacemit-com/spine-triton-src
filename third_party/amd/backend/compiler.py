@@ -1,4 +1,4 @@
-from triton.backends.compiler import BaseBackend, GPUTarget
+from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, amd
 from triton import knobs
 from dataclasses import dataclass
@@ -37,7 +37,9 @@ class HIPOptions:
     debug: bool = False
     sanitize_overflow: bool = True
     arch: str = None
-    supported_fp8_dtypes: Tuple[str] = ("fp8e5", )
+    # We have native support for OCP fp8 variants since CNDA4/RDNA4. For earlier generations,
+    # we software emulate the support for them.
+    supported_fp8_dtypes: Tuple[str] = ("fp8e4nv", "fp8e5")
     deprecated_fp8_dot_operand_dtypes: Tuple[str] = ()
     default_dot_input_precision: str = "ieee"
     allowed_dot_input_precisions: Tuple[str] = ("ieee", )
@@ -98,6 +100,9 @@ class HIPBackend(BaseBackend):
         assert isinstance(target.arch, str)
         self.binary_ext = "hsaco"
 
+    def get_target_name(self, options) -> str:
+        return f"hip:{options.arch}"
+
     def parse_options(self, opts) -> Any:
         args = {'arch': knobs.runtime.override_arch or self.target.arch}
 
@@ -110,11 +115,8 @@ class HIPBackend(BaseBackend):
         if "supported_fp8_dtypes" not in opts:
             supported_fp8_dtypes = set(HIPOptions.supported_fp8_dtypes)
             if self.target.arch == 'gfx942':
-                supported_fp8_dtypes.update({'fp8e4nv', 'fp8e4b8', 'fp8e5b16'})
-            elif self.target.arch == 'gfx950':
-                supported_fp8_dtypes.update({'fp8e4nv', 'fp8e5'})
-            elif 'gfx12' in self.target.arch:
-                supported_fp8_dtypes.update({'fp8e4nv', 'fp8e5'})
+                # CDNA3/gfx942 has native support for AMD specific FP8 types.
+                supported_fp8_dtypes.update({'fp8e4b8', 'fp8e5b16'})
             args["supported_fp8_dtypes"] = tuple(sorted(supported_fp8_dtypes))
 
         if "enable_fp_fusion" not in opts:
@@ -271,6 +273,21 @@ class HIPBackend(BaseBackend):
         return mod
 
     @staticmethod
+    def ttgir_opt(src, metadata, options):
+        mod = src
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+
+        passes.ttgpuir.add_inliner(pm)
+        passes.common.add_sccp(pm)
+        passes.ttir.add_loop_aware_cse(pm)
+        passes.ttgpuir.add_canonicalizer(pm)
+        passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+
+        pm.run(mod)
+        return mod
+
+    @staticmethod
     def make_llir(src, metadata, options):
         mod = src
         # TritonGPU -> LLVM-IR (MLIR)
@@ -419,9 +436,12 @@ class HIPBackend(BaseBackend):
                 ret = fd_out.read()
         return ret
 
-    def add_stages(self, stages, options):
-        stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
-        stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
+    def add_stages(self, stages, options, language):
+        if language == Language.TRITON:
+            stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
+            stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
+        elif language == Language.GLUON:
+            stages["ttgir"] = lambda src, metadata: self.ttgir_opt(src, metadata, options)
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
         stages["amdgcn"] = lambda src, metadata: self.make_amdgcn(src, metadata, options)
         stages["hsaco"] = lambda src, metadata: self.make_hsaco(src, metadata, options)

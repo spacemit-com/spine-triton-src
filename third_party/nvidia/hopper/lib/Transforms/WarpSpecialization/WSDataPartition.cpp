@@ -47,6 +47,9 @@ static void fixTaskId(triton::FuncOp &funcOp) {
         auto defTaskIds = getAsyncTaskIds(defOp);
         // Backward propagation: ensure def covers op's task IDs.
         if (!containsAll(defTaskIds, asyncTaskIds)) {
+          // Skip control flow ops.
+          if (isa<scf::YieldOp, scf::ForOp, scf::IfOp>(op))
+            continue;
           // Only propagate backward to arithmetic ops (e.g. constants).
           // Const ops with same value but different task ids can be folded.
           if (defOp->getDialect()->getNamespace() == "arith") {
@@ -293,7 +296,7 @@ static bool getBackwardSliceToPartition(Value v,
                                        currentDim))
         return false;
       partitionScheme.dotPartitionOperand[dotOp] = currentDim == 0 ? 0 : 1;
-    } else if (isa<ReinterpretTensorDescOp, MakeTensorDescOp>(op)) {
+    } else if (isa<ttng::ReinterpretTensorDescOp, MakeTensorDescOp>(op)) {
       return true;
     } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
       // track yield value
@@ -1012,7 +1015,7 @@ static Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
     }
   } else if (auto tensorDescOp = dyn_cast<MakeTensorDescOp>(op)) {
     newOp = cloneAndSetResultType(op);
-  } else if (auto tensorDescOp = dyn_cast<ReinterpretTensorDescOp>(op)) {
+  } else if (auto tensorDescOp = dyn_cast<ttng::ReinterpretTensorDescOp>(op)) {
     newOp = cloneAndSetResultType(op);
   } else if (isa<TransOp, MemDescTransOp>(op)) {
     sliceOp(op->getOperand(0), offset, mappings, reverseMappings,

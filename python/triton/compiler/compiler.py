@@ -3,14 +3,13 @@ import hashlib
 import json
 from .._C.libtriton import get_cache_invalidating_env_vars, ir
 from ..backends import backends
+from ..backends.compiler import Language
 from ..backends.compiler import BaseBackend, GPUTarget
 from .. import __version__, knobs
 from ..runtime.autotuner import OutOfResources
 from ..runtime.cache import get_cache_manager, get_dump_manager, get_override_manager
 from ..runtime.driver import driver
 from ..tools.disasm import get_sass
-# TODO: this shouldn't be here
-from .code_generator import ast_to_ttir
 from pathlib import Path
 import re
 import functools
@@ -54,8 +53,8 @@ class ASTSource:
 
     def __init__(self, fn, signature, constexprs=None, attrs=None) -> None:
         self.fn = fn
+        self.language = Language.TRITON
         self.ext = "ttir"
-        self.run_ext_passes = True
         self.name = fn.__name__
         self.signature = signature
         self.constants = dict()
@@ -80,6 +79,7 @@ class ASTSource:
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     def make_ir(self, options, codegen_fns, module_map, context):
+        from .code_generator import ast_to_ttir
         return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
                            module_map=module_map)
 
@@ -93,7 +93,7 @@ class IRSource:
         self.path = path
         path = Path(path)
         self.ext = path.suffix[1:]
-        self.run_ext_passes = False
+        self.language = Language.TRITON
         self.src = path.read_text()
         ir.load_dialects(context)
         backend.load_dialects(context)
@@ -320,10 +320,10 @@ def compile(src, target=None, options=None):
     metadata["triton_version"] = __version__
     # run compilation pipeline  and populate metadata
     stages = dict()
-    backend.add_stages(stages, options)
+    backend.add_stages(stages, options, src.language)
     first_stage = list(stages.keys()).index(src.ext)
     # when the source is an IR file, don't apply the passes related to this stage. This makes it easier to write IR level tests.
-    if not src.run_ext_passes:
+    if ir_source:
         first_stage += 1
 
     # For IRSource, we have already grabbed the context + called both
@@ -340,6 +340,14 @@ def compile(src, target=None, options=None):
     except Exception as e:
         filter_traceback(e)
         raise
+
+    if ir_source:
+        ir_filename = f"{file_name}.{src.ext}"
+        metadata_group[ir_filename] = fn_cache_manager.put(module, ir_filename)
+    else:
+        ir_filename = f"{file_name}.source"
+        metadata_group[ir_filename] = fn_cache_manager.put(module, ir_filename)
+
     use_ir_loc = knobs.compilation.use_ir_loc
     if ir_source and use_ir_loc:
         module.create_location_snapshot(src.path)
@@ -363,6 +371,9 @@ def compile(src, target=None, options=None):
             metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
         if fn_dump_manager is not None:
             fn_dump_manager.put(next_module, ir_filename)
+            if ext == "cubin":
+                sass = get_sass(next_module)
+                fn_dump_manager.put(sass, file_name + ".sass")
         # use an env variable to parse ir from file
         if use_ir_loc == ext:
             ir_full_name = fn_cache_manager.get_file(ir_filename)

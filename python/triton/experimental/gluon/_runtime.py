@@ -1,5 +1,7 @@
-from triton.compiler.code_generator import ast_to_ttir
+from __future__ import annotations
+import triton
 from triton.compiler.compiler import ASTSource
+from triton.backends.compiler import Language
 from triton.runtime.jit import JITFunction
 from typing import TypeVar, Optional, Callable, Iterable, Union
 from triton._C.libtriton import ir
@@ -11,14 +13,32 @@ class GluonASTSource(ASTSource):
 
     def __init__(self, fn, signature, constexprs=None, attrs=None) -> None:
         super().__init__(fn, signature, constexprs, attrs)
+        self.language = Language.GLUON
         self.ext = "ttgir"
-        self.run_ext_passes = False
 
     def make_ir(self, options, codegen_fns, module_map, context):
-        module = ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
-                             module_map=module_map)
+        from triton.compiler.compiler import make_backend
+        from triton.compiler.code_generator import ast_to_ttir
+
         builder = ir.builder(context)
+        module = builder.create_module()
+
+        # Assign module attributes eagerly, as they are needed to verify layouts
+        target = triton.runtime.driver.active.get_current_target()
+        backend = make_backend(target)
+        target = backend.get_target_name(options)
+
+        module.set_attr("ttg.target", builder.get_string_attr(target))
         module.set_attr("ttg.num-warps", builder.get_int32_attr(options.num_warps))
+        module.set_attr("ttg.num-ctas", builder.get_int32_attr(options.num_ctas))
+        module.set_attr("ttg.threads-per-warp", builder.get_int32_attr(options.warp_size))
+
+        is_cuda = options.backend_name == "cuda"
+        if is_cuda and options.maxnreg is not None:
+            module.set_attr("ttg.maxnreg", builder.get_int32_attr(options.maxnreg))
+
+        module = ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
+                             module_map=module_map, module=module)
         return module
 
 
